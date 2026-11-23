@@ -1,375 +1,355 @@
-import os
-import streamlit as st
-import pandas as pd
+# Interfaz grafica de SIGU
+
+import io
 import numpy as np
-from scipy import stats
-import matplotlib.pyplot as plt
+import pandas as pd
+import backend as be
 import seaborn as sns
-from sklearn.linear_model import LinearRegression
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import mean_absolute_error, r2_score
+import streamlit as st
+import matplotlib.pyplot as plt
 
-# ---------------------------------------------------------
-# 1. CONFIGURACIÓN DE PÁGINA
-# ---------------------------------------------------------
-st.set_page_config(
-    page_title="SIGU | Gestión Inteligente de Urgencias",
-    page_icon="🏥",
-    layout="wide"
-)
+st.set_page_config(page_title="SIGU – Triage Urgencias", page_icon="🏥", layout="wide")
 
-st.title("🏥 SIGU — Sistema Inteligente de Gestión de Urgencias")
-st.caption("Análisis Probabilístico, Inferencia Estadística y Simulador Predictivo de Tiempos de Atención")
 
-# ---------------------------------------------------------
-# 2. CARGA DE DATOS (BUSCA EN ./ Y EN data/)
-# ---------------------------------------------------------
+# ------------------------------------------------------------------ datos (cache)
 @st.cache_data
-def cargar_datos():
-    if os.path.exists("data/urgencias_limpio.csv"):
-        ruta = "data/urgencias_limpio.csv"
-    elif os.path.exists("urgencias_limpio.csv"):
-        ruta = "urgencias_limpio.csv"
-    else:
-        st.error("No se encontró 'urgencias_limpio.csv'. Colócalo junto a app.py o dentro de la carpeta data/.")
-        st.stop()
+def datos():
+    return be.cargar_datos(), be.cargar_llegadas(), be.cargar_calidad()
 
-    df = pd.read_csv(ruta)
-    df["dt_ingreso"] = pd.to_datetime(df["dt_ingreso"])
-    df["dt_atencion"] = pd.to_datetime(df["dt_atencion"])
-    # Depurar los 172 desfases mínimos de reloj (< 0 min)
-    df = df[df["tiempo_espera_min"] >= 0].copy()
-    return df
 
-df = cargar_datos()
+@st.cache_resource
+def entrenar(ips_sel: str):
+    """Entrena la regresión de Poisson una sola vez por IPS seleccionada."""
+    _, lleg_todas, _ = datos()
+    l = lleg_todas if ips_sel == "Todas" else lleg_todas[lleg_todas["Ips"] == ips_sel]
+    return be.modelo_regresion_poisson(l)
 
-# ---------------------------------------------------------
-# 3. BARRA LATERAL: FILTROS OPERATIVOS
-# ---------------------------------------------------------
-st.sidebar.header("⚙️ Filtros Operativos")
 
-sedes_ordenadas = sorted(df["Ips"].unique().tolist())
-opciones_sede = ["Todas las sedes"] + sedes_ordenadas
-idx_default = opciones_sede.index("HOSPITAL LOCAL CIVIL") if "HOSPITAL LOCAL CIVIL" in opciones_sede else 0
-
-sede_sel = st.sidebar.selectbox("IPS / Sede hospitalaria:", options=opciones_sede, index=idx_default)
-
-franja_sel = st.sidebar.selectbox(
-    "Franja horaria:",
-    options=["Todas las franjas"] + sorted(df["franja_horaria"].unique().tolist())
-)
-
-triages_disponibles = ["I", "II", "III", "IV", "V"]
-triage_sel = st.sidebar.multiselect(
-    "Nivel de Triage:",
-    options=triages_disponibles,
-    default=triages_disponibles
-)
-
-# Aplicar filtros
-df_filtrado = df[df["Triage"].isin(triage_sel)].copy()
-if sede_sel != "Todas las sedes":
-    df_filtrado = df_filtrado[df_filtrado["Ips"] == sede_sel]
-if franja_sel != "Todas las franjas":
-    df_filtrado = df_filtrado[df_filtrado["franja_horaria"] == franja_sel]
-
-st.sidebar.markdown("---")
-st.sidebar.metric("Registros analizados", f"{len(df_filtrado):,}")
-
-if len(df_filtrado) < 30:
-    st.warning("La selección actual tiene muy pocos registros (< 30). Amplía los filtros en el panel izquierdo.")
+try:
+    df, llegadas, calidad = datos()
+except FileNotFoundError as e:
+    st.error(str(e))
     st.stop()
 
-# ---------------------------------------------------------
-# 4. ESTRUCTURA DE PESTAÑAS (METODOLOGÍA DEL PROYECTO)
-# ---------------------------------------------------------
-tab1, tab2, tab3, tab4 = st.tabs([
-    "📊 1. Exploración Descriptiva",
-    "🎲 2. Modelación Probabilística",
-    "📐 3. Inferencia y Bondad de Ajuste",
-    "🤖 4. Regresión y Simulador ML"
-])
 
-# =========================================================
-# PESTAÑA 1: ESTADÍSTICA DESCRIPTIVA
-# =========================================================
-with tab1:
-    st.subheader(f"Panorama Descriptivo — {sede_sel}")
+def tarjeta_prueba(r: dict):
+    """Muestra H0/H1, estadístico, p y decisión de una prueba."""
+    st.markdown(f"**H₀:** {r['h0']}  \n**H₁:** {r['h1']}")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Estadístico", f"{r['estadistico']:.3f}")
+    c2.metric("Grados de libertad" if "gl" in r else "n muestra", r.get("gl", r.get("n")))
+    c3.metric("Valor p", be.formato_p(r["p"]))
+    if r["p"] < r["alpha"]:
+        st.error(f"**{r['decision']}** (p < α = {r['alpha']})")
+    else:
+        st.success(f"**{r['decision']}** (p ≥ α = {r['alpha']})")
 
+
+# ------------------------------------------------------------------ barra lateral
+st.sidebar.header("Filtros")
+triages_disp = [t for t in be.TRIAGE_ORDEN if t in df["Triage"].unique()]
+triages = st.sidebar.multiselect("Triage", triages_disp, default=triages_disp)
+ips = st.sidebar.selectbox("IPS", ["Todas"] + sorted(df["Ips"].dropna().unique().tolist()))
+alpha = st.sidebar.select_slider("Nivel de significancia α", [0.01, 0.05, 0.10], value=0.05)
+st.sidebar.caption("El filtro de triage no aplica a las pestañas Poisson, Modelo y Malla "
+                   "(las llegadas se cuentan por IPS-hora).")
+
+dff = be.filtrar(df, triages, ips)
+lleg = llegadas if ips == "Todas" else llegadas[llegadas["Ips"] == ips]
+
+st.title("🏥 Tiempos de espera y demanda en urgencias")
+st.caption("MVP – Analítica Descriptiva II y Probabilidad")
+
+if dff.empty:
+    st.warning("No hay registros con los filtros seleccionados.")
+    st.stop()
+
+tab_datos, tab_desc, tab_dias, tab_poi, tab_mod, tab_malla = st.tabs(
+    ["📋 Datos", "📊 Descriptiva", "📅 χ² por día", "🎲 Poisson",
+     "🤖 Regresión Poisson", "👩‍⚕️ Malla de turnos"])
+
+# ------------------------------------------------------------------ 1. Datos
+with tab_datos:
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Registros filtrados", f"{len(dff):,}")
+    c2.metric("IPS", dff["Ips"].nunique())
+    c3.metric("Periodo", f"{dff['dt_ingreso'].min():%d/%m/%Y} – {dff['dt_ingreso'].max():%d/%m/%Y}")
+    st.subheader("Calidad de datos (limpieza)")
+    st.dataframe(calidad, hide_index=True, use_container_width=True)
+    st.subheader("Vista previa")
+    st.dataframe(dff.head(100), use_container_width=True)
+
+# ------------------------------------------------------------------ 2. Descriptiva
+with tab_desc:
+    espera = dff["tiempo_espera_min"]
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Total Pacientes", f"{len(df_filtrado):,}")
-    c2.metric("Espera Promedio", f"{df_filtrado['tiempo_espera_min'].mean():.1f} min")
-    c3.metric("Mediana de Espera", f"{df_filtrado['tiempo_espera_min'].median():.1f} min")
-    c4.metric("Desviación Estándar", f"{df_filtrado['tiempo_espera_min'].std():.1f} min")
+    c1.metric("Media (min)", f"{espera.mean():.2f}")
+    c2.metric("Mediana (min)", f"{espera.median():.2f}")
+    c3.metric("Desv. estándar", f"{espera.std():.2f}" if len(espera) > 1 else "–")
+    c4.metric("Asimetría", f"{espera.skew():.2f}" if len(espera) > 2 else "–")
 
-    col_g1, col_g2 = st.columns(2)
+    st.subheader("Estadísticos por triage")
+    st.dataframe(be.descriptivos(dff), use_container_width=True)
+    if len(dff) < 100:
+        st.info("Pocos registros con estos filtros; interprete los resultados con cautela.")
 
-    with col_g1:
-        st.markdown("**Distribución del Tiempo de Espera (Histograma)**")
-        fig1, ax1 = plt.subplots(figsize=(7, 4))
-        sns.histplot(df_filtrado["tiempo_espera_min"], bins=40, kde=True, color="#1f77b4", ax=ax1)
-        ax1.axvline(df_filtrado["tiempo_espera_min"].mean(), color="red", linestyle="--", label="Media")
-        ax1.axvline(df_filtrado["tiempo_espera_min"].median(), color="green", linestyle="-.", label="Mediana")
-        ax1.set_xlabel("Tiempo de espera (minutos)")
-        ax1.set_ylabel("Frecuencia de pacientes")
-        ax1.legend()
-        st.pyplot(fig1)
-        plt.close(fig1)
+    g1, g2 = st.columns(2)
+    with g1:
+        fig, ax = plt.subplots(figsize=(6, 4))
+        sns.histplot(espera, bins=50, ax=ax, color="#1f77b4")
+        ax.axvline(espera.mean(), color="red", ls="--", label="Media")
+        ax.axvline(espera.median(), color="green", ls="--", label="Mediana")
+        ax.set(title="Histograma del tiempo de espera", xlabel="Minutos", ylabel="Frecuencia")
+        ax.legend()
+        st.pyplot(fig)
+    with g2:
+        fig, ax = plt.subplots(figsize=(6, 4))
+        orden = [t for t in be.TRIAGE_ORDEN if t in dff["Triage"].unique()]
+        ax.boxplot([dff.loc[dff["Triage"] == t, "tiempo_espera_min"] for t in orden],
+                   flierprops={"markersize": 2})
+        ax.set_xticks(range(1, len(orden) + 1), orden)
+        ax.set(xlabel="Triage", title="Espera por triage", ylabel="Minutos")
+        st.pyplot(fig)
 
-    with col_g2:
-        st.markdown("**Tiempo de Espera por Nivel de Triage (Boxplot)**")
-        fig2, ax2 = plt.subplots(figsize=(7, 4))
-        sns.boxplot(
-            data=df_filtrado,
-            x="Triage",
-            y="tiempo_espera_min",
-            order=["I", "II", "III", "IV", "V"],
-            hue="Triage",
-            palette="Blues",
-            legend=False,
-            ax=ax2
-        )
-        ax2.set_xlabel("Nivel de Triage")
-        ax2.set_ylabel("Tiempo de espera (minutos)")
-        st.pyplot(fig2)
-        plt.close(fig2)
+    st.subheader("Intervalo de confianza 95 % de la media")
+    st.dataframe(be.ic_por_triage(dff).rename(columns={"li": "Límite inf.", "ls": "Límite sup."}),
+                 hide_index=True, use_container_width=True)
 
-    st.markdown("**Demanda Acumulada de Ingresos por Hora del Día**")
-    demanda_hora = df_filtrado.groupby("hora_dia").size().reset_index(name="pacientes")
-    fig3, ax3 = plt.subplots(figsize=(12, 3))
-    sns.barplot(data=demanda_hora, x="hora_dia", y="pacientes", color="#2b5c8f", ax=ax3)
-    ax3.set_xlabel("Hora del día (0 a 23)")
-    ax3.set_ylabel("Total de ingresos")
-    st.pyplot(fig3)
-    plt.close(fig3)
+    st.subheader("Normalidad (Shapiro–Wilk)")
+    r = be.prueba_normalidad(espera, alpha)
+    if r:
+        tarjeta_prueba(r)
+        st.caption("Muestra aleatoria de hasta 5 000 registros (semilla fija).")
+    else:
+        st.info("No hay suficientes datos para la prueba.")
 
-# =========================================================
-# PESTAÑA 2: MODELACIÓN PROBABILÍSTICA
-# =========================================================
-with tab2:
-    st.subheader("Ajuste de Distribuciones y Probabilidades de Congestión")
+# ------------------------------------------------------------------ 3. χ² uniforme días
+with tab_dias:
+    st.subheader("¿Las atenciones se reparten igual entre los días de la semana?")
+    r = be.chi2_uniforme_dias(dff, alpha)
+    tarjeta_prueba(r)
+    c1, c2 = st.columns([3, 2])
+    with c1:
+        t = r["tabla"]
+        fig, ax = plt.subplots(figsize=(7, 4))
+        ax.bar(t.index, t["Observado"], color="#1f77b4", label="Observado")
+        ax.plot(t.index, t["Esperado"], "r--o", label="Esperado (uniforme)")
+        ax.set(title="Atenciones por día: observado vs esperado", ylabel="Atenciones")
+        ax.legend()
+        plt.xticks(rotation=30)
+        st.pyplot(fig)
+    with c2:
+        st.dataframe(r["tabla"], use_container_width=True)
+    st.caption("Con muestras grandes, diferencias pequeñas resultan significativas; "
+               "compare también visualmente O vs E.")
 
-    # Construir serie horaria solo sobre meses activos (evita el hueco 2020-2021)
-    meses_activos = set(df_filtrado["anio_mes"].unique())
-    rango_h = pd.date_range(
-        df_filtrado["dt_ingreso"].min().floor("h"),
-        df_filtrado["dt_ingreso"].max().ceil("h"),
-        freq="h"
-    )
-    rango_h = rango_h[rango_h.to_period("M").astype(str).isin(meses_activos)]
+# ------------------------------------------------------------------ 4. Poisson
+with tab_poi:
+    st.subheader("Llegadas de pacientes por IPS y hora")
+    if lleg.empty:
+        st.warning("No hay datos de llegadas para la IPS seleccionada.")
+    else:
+        lam = lleg["llegadas"].mean()
+        c1, c2, c3 = st.columns(3)
+        c1.metric("λ (media llegadas/hora)", f"{lam:.3f}")
+        c2.metric("Varianza", f"{lleg['llegadas'].var():.3f}" if len(lleg) > 1 else "–")
+        c3.metric("Bloques IPS-hora", f"{len(lleg):,}")
+        st.caption("En una Poisson la media y la varianza deberían ser parecidas.")
 
-    if franja_sel != "Todas las franjas":
-        horas_validas = df_filtrado["hora_dia"].unique()
-        rango_h = rango_h[rango_h.hour.isin(horas_validas)]
+        st.markdown("#### Calculadora de probabilidades")
+        k = st.slider("Número de llegadas en una hora (k)", 0, 20, int(round(lam)))
+        pr = be.prob_poisson(lam, k)
+        p1, p2, p3 = st.columns(3)
+        p1.metric(f"P(X = {k})", f"{pr['P(X = k)']:.4f}")
+        p2.metric(f"P(X ≤ {k})", f"{pr['P(X ≤ k)']:.4f}")
+        p3.metric(f"P(X ≥ {k})", f"{pr['P(X ≥ k)']:.4f}")
+        st.latex(r"P(X=k)=\frac{e^{-\lambda}\lambda^{k}}{k!}")
 
-    serie_horas = df_filtrado.set_index("dt_ingreso").resample("h").size().reindex(rango_h, fill_value=0)
-    lam = serie_horas.mean()
-
-    col_p1, col_p2 = st.columns(2)
-
-    # --- A. POISSON ---
-    with col_p1:
-        st.markdown("### 1. Llegadas por Hora — Poisson (λ)")
-        umbral_llegadas = st.slider("Umbral crítico de pacientes/hora (k):", 1, 25, 5)
-        prob_poisson = 1 - stats.poisson.cdf(umbral_llegadas, mu=lam)
-
-        m_p1, m_p2 = st.columns(2)
-        m_p1.metric("Tasa promedio (λ)", f"{lam:.2f} pac/hora")
-        m_p2.metric(f"Riesgo P(X > {umbral_llegadas} pac/h)", f"{prob_poisson * 100:.2f}%")
-
-        k_vals = np.arange(0, max(12, int(serie_horas.max()) + 1))
-        pmf_teorica = stats.poisson.pmf(k_vals, mu=lam)
-        freq_obs = serie_horas.value_counts(normalize=True).reindex(k_vals, fill_value=0)
-
-        fig_p, ax_p = plt.subplots(figsize=(6, 3.8))
-        ax_p.bar(k_vals - 0.15, freq_obs.values, width=0.35, label="Observado", color="#7fb3d5")
-        ax_p.bar(k_vals + 0.15, pmf_teorica, width=0.35, label=f"Poisson (λ={lam:.2f})", color="#1f618d")
-        ax_p.set_xlabel("Pacientes que ingresan en una hora")
-        ax_p.set_ylabel("Probabilidad")
-        ax_p.legend()
-        st.pyplot(fig_p)
-        plt.close(fig_p)
-
-    # --- B. NORMAL VS LOG-NORMAL ---
-    with col_p2:
-        st.markdown("### 2. Tiempo de Espera — Normal vs. Log-normal")
-        espera_pos = df_filtrado[df_filtrado["tiempo_espera_min"] > 0]["tiempo_espera_min"]
-
-        mu_norm, std_norm = stats.norm.fit(espera_pos)
-        shape_log, loc_log, scale_log = stats.lognorm.fit(espera_pos, floc=0)
-
-        umbral_min = st.slider("Tiempo máximo de espera tolerado (min):", 15, 180, 60)
-        prob_norm = 1 - stats.norm.cdf(umbral_min, loc=mu_norm, scale=std_norm)
-        prob_log = 1 - stats.lognorm.cdf(umbral_min, s=shape_log, loc=loc_log, scale=scale_log)
-
-        m_e1, m_e2 = st.columns(2)
-        m_e1.metric(f"Normal: P(X > {umbral_min} min)", f"{prob_norm * 100:.2f}%")
-        m_e2.metric(f"Log-normal: P(X > {umbral_min} min)", f"{prob_log * 100:.2f}%")
-
-        x_vals = np.linspace(0.1, np.percentile(espera_pos, 99), 200)
-        fig_e, ax_e = plt.subplots(figsize=(6, 3.8))
-        sns.histplot(espera_pos, bins=35, stat="density", color="#d5dbdb", label="Datos reales", ax=ax_e)
-        ax_e.plot(x_vals, stats.norm.pdf(x_vals, mu_norm, std_norm), "r--", lw=2, label="Normal")
-        ax_e.plot(x_vals, stats.lognorm.pdf(x_vals, shape_log, loc=0, scale=scale_log), "g-", lw=2, label="Log-normal")
-        ax_e.axvline(umbral_min, color="black", linestyle=":", label=f"Umbral ({umbral_min} min)")
-        ax_e.set_xlabel("Tiempo de espera (minutos)")
-        ax_e.legend()
-        st.pyplot(fig_e)
-        plt.close(fig_e)
-
-    # --- C. EXPONENCIAL ---
-    st.markdown("---")
-    st.markdown("### 3. Tiempo entre Llegadas — Distribución Exponencial (1/λ)")
-    tel_pos = df_filtrado[
-        (df_filtrado["tiempo_entre_llegadas_min"] > 0) &
-        (df_filtrado["tiempo_entre_llegadas_min"] <= 1440)
-    ]["tiempo_entre_llegadas_min"].dropna()
-
-    if len(tel_pos) > 10:
-        _, scale_exp = stats.expon.fit(tel_pos, floc=0)
-        min_rapido = st.slider("Intervalo entre llegadas consecutivas (minutos):", 1, 30, 5)
-        prob_exp = stats.expon.cdf(min_rapido, loc=0, scale=scale_exp)
-
-        ce1, ce2 = st.columns(2)
-        ce1.metric("Tiempo promedio entre llegadas (1/λ)", f"{scale_exp:.2f} min")
-        ce2.metric(f"Probabilidad de llegada rápida P(X < {min_rapido} min)", f"{prob_exp * 100:.2f}%")
-
-# =========================================================
-# PESTAÑA 3: INFERENCIA Y BONDAD DE AJUSTE
-# =========================================================
-with tab3:
-    st.subheader("Estimación por Intervalos, Pruebas de Hipótesis y Bondad de Ajuste")
-
-    col_i1, col_i2 = st.columns(2)
-
-    with col_i1:
-        st.markdown("### 1. Intervalo de Confianza (95%) y Prueba t-Student")
-        n_muestra = st.slider("Tamaño de muestra aleatoria (n):", 30, min(1000, len(df_filtrado)), 150)
-        meta_inst = st.number_input("Meta máxima institucional de espera (μ₀ en min):", value=45.0, step=5.0)
-
-        muestra = df_filtrado["tiempo_espera_min"].sample(n=n_muestra, random_state=42)
-        media_m = muestra.mean()
-        sem_m = stats.sem(muestra)
-        ic_inf, ic_sup = stats.t.interval(0.95, df=n_muestra - 1, loc=media_m, scale=sem_m)
-
-        # Prueba unilateral H1: mu > meta_inst
-        t_stat, p_val_bi = stats.ttest_1samp(muestra, popmean=meta_inst)
-        p_val_uni = p_val_bi / 2 if t_stat > 0 else 1 - (p_val_bi / 2)
-
-        st.write(f"**Media muestral:** `{media_m:.2f} min`")
-        st.write(f"**IC 95% para la media:** `[{ic_inf:.2f} min , {ic_sup:.2f} min]`")
-        st.write(f"**Estadístico t:** `{t_stat:.4f}` | **Valor p (unilateral):** `{p_val_uni:.4e}`")
-
-        if p_val_uni < 0.05:
-            st.error(f"Se rechaza H₀ (α = 0.05): El tiempo promedio supera estadísticamente la meta de {meta_inst} min.")
+        st.markdown("#### Prueba χ² de bondad de ajuste")
+        r = be.chi2_poisson(lleg, alpha)
+        if r is None:
+            st.warning("Esta IPS tiene muy pocos registros: no hay suficientes categorías con "
+                       "frecuencia esperada ≥ 5 para aplicar la prueba χ². "
+                       "Seleccione otra IPS o 'Todas'.")
         else:
-            st.success(f"No se rechaza H₀ (α = 0.05): El tiempo promedio cumple estadísticamente con la meta de {meta_inst} min.")
+            tarjeta_prueba(r)
+            c1, c2 = st.columns([3, 2])
+            with c1:
+                t = r["tabla"]
+                x = np.arange(len(t))
+                fig, ax = plt.subplots(figsize=(7, 4))
+                ax.bar(x - 0.2, t["Observado"], 0.4, label="Observado")
+                ax.bar(x + 0.2, t["Esperado"], 0.4, label="Poisson esperado")
+                ax.set_xticks(x, t["k (llegadas/hora)"])
+                ax.set(title="Llegadas por hora: observado vs Poisson",
+                       xlabel="Llegadas en una hora", ylabel="Número de horas")
+                ax.legend()
+                st.pyplot(fig)
+            with c2:
+                st.dataframe(r["tabla"], hide_index=True, use_container_width=True)
+            st.caption("Celdas con frecuencia esperada < 5 agrupadas en las colas. "
+                       "gl = categorías − 1 − 1 (λ estimado).")
 
-    with col_i2:
-        st.markdown("### 2. Bondad de Ajuste Chi-Cuadrado (χ²) para Poisson")
-        obs_counts = serie_horas.value_counts().sort_index()
-        vals = obs_counts.index.values
-        f_obs = obs_counts.values
-        f_exp = stats.poisson.pmf(vals, mu=lam) * len(serie_horas)
+# ------------------------------------------------------------------ 5. Regresión Poisson
+with tab_mod:
+    st.subheader("Modelo de regresión de Poisson para predecir llegadas por hora")
+    st.latex(r"\log(\lambda)=\beta_0+\beta_{\text{día}}+\beta_{\text{hora}}"
+             r"+\beta_{\text{mes}}+\beta_{\text{IPS}}")
+    res = entrenar(ips)
+    if res is None:
+        st.warning("No hay datos suficientes para entrenar el modelo con esta IPS. "
+                   "Seleccione otra IPS o 'Todas'.")
+    else:
+        st.caption(f"Entrenamiento: {res['n_entrenamiento']:,} bloques IPS-hora hasta "
+                   f"{res['corte']:%d/%m/%Y} · Prueba: {res['n_prueba']:,} bloques hasta "
+                   f"{res['fin']:%d/%m/%Y} (último 20 % del periodo, datos no vistos).")
 
-        valid = f_exp >= 5
-        if valid.sum() >= 2:
-            f_obs_g = np.append(f_obs[valid], f_obs[~valid].sum())
-            f_exp_g = np.append(f_exp[valid], f_exp[~valid].sum())
-            f_exp_g = f_exp_g * (f_obs_g.sum() / f_exp_g.sum())
-            chi2_stat, p_chi2 = stats.chisquare(f_obs_g, f_exp_g, ddof=1)
+        met = res["metricas"]
+        mae_m, mae_b = met.loc["MAE", "Regresión Poisson"], met.loc["MAE", "Línea base (promedio)"]
+        mejora = (mae_b - mae_m) / mae_b * 100 if mae_b > 0 else 0
+        phi = res["phi"]
 
-            st.write(f"**Estadístico χ²:** `{chi2_stat:.2f}`")
-            st.write(f"**Valor p:** `{p_chi2:.4e}`")
-            if p_chi2 < 0.05:
-                st.warning("p < 0.05: Al mezclar distintas franjas horarias o días, λ varía (no es estacionario). Filtra por una franja horaria específica en la barra lateral para evaluar el supuesto de tasa constante.")
-            else:
-                st.success("p ≥ 0.05: Las llegadas se ajustan estadísticamente a una distribución de Poisson.")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("MAE modelo", f"{mae_m:.3f} pac/h")
+        c2.metric("MAE línea base", f"{mae_b:.3f} pac/h")
+        c3.metric("Mejora vs base", f"{mejora:.1f} %", delta=f"{mejora:.1f} %")
+        c4.metric("Dispersión φ", f"{phi:.2f}")
+
+        # Interpretación de φ
+        if phi < 0.8:
+            st.info(f"φ = {phi:.2f} < 1: **subdispersión**. Hay menos variación que la que "
+                    "supone la Poisson; el percentil de la malla es conservador.")
+        elif phi <= 1.5:
+            st.success(f"φ = {phi:.2f} ≈ 1: la varianza es similar a la media, "
+                       "**el supuesto de Poisson es razonable**.")
         else:
-            st.info("No hay suficientes clases con frecuencia esperada ≥ 5 para ejecutar χ².")
+            st.warning(f"φ = {phi:.2f} > 1,5: **sobredispersión**. Los datos varían más de lo "
+                       "que supone la Poisson; los errores estándar se subestiman y conviene "
+                       "una Binomial Negativa o subir el nivel de servicio de la malla.")
 
-# =========================================================
-# PESTAÑA 4: REGRESIÓN Y SIMULADOR PREDICTIVO
-# =========================================================
-@st.cache_resource
-def entrenar_modelo_rf(df_datos):
-    df_ml = df_datos.copy()
-    df_ml["fecha_hora"] = df_ml["dt_ingreso"].dt.floor("h")
-    carga_h = df_ml.groupby("fecha_hora").size().rename("carga_horaria")
-    df_sup = df_ml.merge(carga_h, on="fecha_hora")
+        st.markdown("#### Métricas en el conjunto de prueba")
+        st.dataframe(met, use_container_width=True)
+        with st.expander("¿Qué significa cada métrica?"):
+            st.markdown(
+                "- **MAE** (error absoluto medio): en promedio, cuántos pacientes por hora se "
+                "equivoca la predicción. Menor es mejor.\n"
+                "- **RMSE**: como el MAE pero castiga más los errores grandes (horas pico).\n"
+                "- **Devianza Poisson media**: error propio de datos de conteo; menor es mejor.\n"
+                "- **D²**: % de la devianza explicada frente a predecir siempre la media "
+                "(equivalente al R² para Poisson). 0 = no mejora; 1 = perfecto.\n"
+                "- **φ (dispersión de Pearson)**: Σ(y−μ̂)²/μ̂ ÷ (n − p). "
+                "En una Poisson ideal vale 1.")
 
-    X = pd.get_dummies(df_sup[["hora_dia", "carga_horaria", "Triage"]], drop_first=False)
-    y = df_sup["tiempo_espera_min"]
+        g1, g2 = st.columns(2)
+        with g1:  # Comparación de métricas
+            fig, ax = plt.subplots(figsize=(6, 4))
+            filas = ["MAE", "RMSE", "Devianza Poisson media"]
+            x = np.arange(len(filas))
+            ax.bar(x - 0.2, met.loc[filas, "Regresión Poisson"], 0.4, label="Regresión Poisson")
+            ax.bar(x + 0.2, met.loc[filas, "Línea base (promedio)"], 0.4,
+                   label="Línea base (promedio)", color="#999999")
+            for i, v in enumerate(met.loc[filas, "Regresión Poisson"]):
+                ax.text(i - 0.2, v, f"{v:.2f}", ha="center", va="bottom", fontsize=8)
+            for i, v in enumerate(met.loc[filas, "Línea base (promedio)"]):
+                ax.text(i + 0.2, v, f"{v:.2f}", ha="center", va="bottom", fontsize=8)
+            ax.set_xticks(x, ["MAE", "RMSE", "Devianza"])
+            ax.set(title="Errores en prueba (menor es mejor)", ylabel="Valor")
+            ax.legend()
+            st.pyplot(fig)
+        with g2:  # Dispersión: varianza vs media por grupo
+            fig, ax = plt.subplots(figsize=(6, 4))
+            pred, resid = res["pred_pru"], res["residuos"]
+            grupos = np.digitize(pred, np.quantile(pred, np.linspace(0, 1, 11)[1:-1]))
+            medias = [pred[grupos == g].mean() for g in np.unique(grupos)]
+            varianzas = [(resid[grupos == g] ** 2).mean() for g in np.unique(grupos)]
+            lim = max(max(medias), max(varianzas)) * 1.1
+            ax.plot([0, lim], [0, lim], "k--", label="Poisson ideal (Var = media, φ = 1)")
+            ax.plot([0, lim], [0, lim * phi], "r:", label=f"φ estimado = {phi:.2f}")
+            ax.scatter(medias, varianzas, color="#1f77b4", zorder=3, label="Grupos de predicción")
+            ax.set(title="Parámetro de dispersión", xlabel="Media predicha (λ̂)",
+                   ylabel="Varianza observada (y − λ̂)²")
+            ax.legend(fontsize=8)
+            st.pyplot(fig)
 
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-    modelo = RandomForestRegressor(n_estimators=40, max_depth=8, random_state=42, n_jobs=-1)
-    modelo.fit(X_train, y_train)
-    y_pred = modelo.predict(X_test)
+        st.markdown("#### Predicción vs realidad en el periodo de prueba")
+        g3, g4 = st.columns(2)
+        with g3:
+            pdia = res["por_dia"]
+            fig, ax = plt.subplots(figsize=(6, 4))
+            ax.plot(pdia.index, pdia["observado"], label="Observado", color="black")
+            ax.plot(pdia.index, pdia["modelo"], label="Regresión Poisson", color="#1f77b4")
+            ax.plot(pdia.index, pdia["base"], label="Línea base", color="#999999", ls="--")
+            ax.set(title="Pacientes por día", ylabel="Pacientes")
+            ax.legend(fontsize=8)
+            fig.autofmt_xdate()
+            st.pyplot(fig)
+        with g4:
+            ph = res["por_hora"]
+            fig, ax = plt.subplots(figsize=(6, 4))
+            ax.plot(ph.index, ph["observado"], "ko-", label="Observado", ms=3)
+            ax.plot(ph.index, ph["modelo"], color="#1f77b4", label="Regresión Poisson")
+            ax.plot(ph.index, ph["base"], color="#999999", ls="--", label="Línea base")
+            ax.set(title="Promedio de llegadas por hora del día", xlabel="Hora",
+                   ylabel="Pacientes por hora", xticks=range(0, 24, 2))
+            ax.legend(fontsize=8)
+            st.pyplot(fig)
 
-    mae = mean_absolute_error(y_test, y_pred)
-    r2 = r2_score(y_test, y_pred)
-    return modelo, X.columns.tolist(), mae, r2
+# ------------------------------------------------------------------ 6. Malla de turnos
+with tab_malla:
+    st.subheader(f"Malla de turnos sugerida – {ips if ips != 'Todas' else 'todas las IPS (red)'}")
+    if lleg.empty:
+        st.warning("No hay datos de llegadas para la IPS seleccionada.")
+    else:
+        c1, c2, c3 = st.columns(3)
+        cap = c1.number_input("Pacientes que atiende un médico por hora", 0.5, 20.0, 3.0, 0.5,
+                              help="Supuesto operativo: ajústelo con el dato real de la IPS.")
+        nivel = c2.slider("Nivel de servicio (cobertura de la demanda)", 0.50, 0.99, 0.90, 0.01,
+                          help="0,90 = el número de médicos alcanza en el 90 % de las horas.")
+        fuente = c3.radio("Predicción de λ", ["Promedio histórico", "Regresión Poisson"])
 
-with tab4:
-    st.subheader("Análisis Bivariado y Simulador Predictivo de Dotación")
+        res_m = entrenar(ips) if fuente == "Regresión Poisson" else None
+        if fuente == "Regresión Poisson" and res_m is None:
+            st.info("No se pudo entrenar el modelo con esta IPS; se usa el promedio histórico.")
+        lam_tabla = (be.lambda_modelo_semana(res_m, lleg) if res_m is not None
+                     else be.demanda_por_hora(lleg))
+        pacientes, medicos = be.medicos_por_hora(lam_tabla, cap, nivel)
+        malla = be.malla_turnos(medicos)
 
-    df_reg = df_filtrado.copy()
-    df_reg["fecha_hora"] = df_reg["dt_ingreso"].dt.floor("h")
-    resumen_horario = df_reg.groupby("fecha_hora").agg(
-        llegadas_hora=("tiempo_espera_min", "count"),
-        espera_promedio=("tiempo_espera_min", "mean")
-    ).reset_index()
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Pacientes promedio/semana", f"{lam_tabla.values.sum():,.0f}")
+        m2.metric("Hora pico (λ)", f"{lam_tabla.values.max():.2f} pac/h")
+        m3.metric("Horas-médico/semana", f"{malla['Horas-médico/día'].sum():,}")
 
-    col_r1, col_r2 = st.columns(2)
+        st.markdown("#### 1. Demanda predicha (λ pacientes por hora)")
+        fig, ax = plt.subplots(figsize=(12, 3.8))
+        sns.heatmap(lam_tabla, cmap="YlOrRd", ax=ax, cbar_kws={"label": "λ pacientes/hora"})
+        ax.set(xlabel="Hora del día", ylabel="")
+        st.pyplot(fig)
 
-    with col_r1:
-        st.markdown("### 1. Correlación y Regresión Lineal Simple")
-        if len(resumen_horario) > 5:
-            r_val, p_r = stats.pearsonr(resumen_horario["llegadas_hora"], resumen_horario["espera_promedio"])
-            reg = LinearRegression()
-            reg.fit(resumen_horario[["llegadas_hora"]], resumen_horario["espera_promedio"])
+        st.markdown(f"#### 2. Médicos requeridos por hora (percentil {nivel:.0%} de la Poisson)")
+        fig, ax = plt.subplots(figsize=(12, 3.8))
+        sns.heatmap(medicos, annot=True, fmt="d", cmap="Blues", ax=ax, cbar=False)
+        ax.set(xlabel="Hora del día", ylabel="")
+        st.pyplot(fig)
 
-            st.write(f"**Correlación de Pearson (r):** `{r_val:.4f}` (valor p: `{p_r:.4e}`)")
-            st.write(f"**Recta estimada:** `Espera = {reg.intercept_:.2f} + {reg.coef_[0]:.2f} × Llegadas/hora`")
+        st.markdown("#### 3. Malla de turnos (médicos por turno de 6 h)")
+        st.dataframe(malla, use_container_width=True)
+        
+        # Crear un búfer en memoria y escribir el Excel
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+            malla.to_excel(writer, index=True, sheet_name='Malla_Turnos')
 
-            fig_r, ax_r = plt.subplots(figsize=(6, 3.8))
-            sns.regplot(
-                data=resumen_horario.sample(min(1500, len(resumen_horario)), random_state=42),
-                x="llegadas_hora",
-                y="espera_promedio",
-                scatter_kws={"alpha": 0.3, "color": "#2b5c8f"},
-                line_kws={"color": "red"},
-                ax=ax_r
-            )
-            ax_r.set_xlabel("Pacientes que ingresan en la hora")
-            ax_r.set_ylabel("Tiempo de espera promedio (min)")
-            st.pyplot(fig_r)
-            plt.close(fig_r)
-
-    with col_r2:
-        st.markdown("### 2. Simulador Predictivo de Personal (Machine Learning)")
-        modelo_rf, cols_modelo, mae, r2 = entrenar_modelo_rf(df_filtrado)
-        st.caption(f"Validación Random Forest — **MAE:** {mae:.1f} min | **R²:** {r2:.2f}")
-
-        sim_hora = st.slider("Hora del turno a simular (0 - 23):", 0, 23, 10)
-        sim_llegadas = st.slider("Demanda esperada (pacientes/hora):", 1, 20, 6)
-        sim_triage = st.selectbox("Nivel de Triage:", ["I", "II", "III", "IV", "V"], index=2)
-        sim_medicos = st.slider("Médicos asignados al turno:", 1, 8, 2)
-
-        fila_sim = pd.DataFrame(0, index=[0], columns=cols_modelo)
-        fila_sim["hora_dia"] = sim_hora
-        # Ajuste operativo: mayor dotación médica distribuye la carga efectiva por profesional
-        fila_sim["carga_horaria"] = sim_llegadas * (2.0 / sim_medicos)
-        col_triage = f"Triage_{sim_triage}"
-        if col_triage in fila_sim.columns:
-            fila_sim[col_triage] = 1
-
-        espera_estimada = modelo_rf.predict(fila_sim)[0]
-
-        st.metric(
-            label=f"Tiempo de espera proyectado ({sim_medicos} médico/s)",
-            value=f"{espera_estimada:.1f} min",
-            delta=f"{espera_estimada - 60:.1f} min vs umbral crítico (60 min)",
-            delta_color="inverse"
+        # Botón de descarga en Streamlit
+        st.download_button(
+            label="⬇️ Descargar malla (Excel)",
+            data=buffer.getvalue(),
+            file_name=f"malla_turnos_{ips}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
+
+        st.caption(
+            "Método: λ = promedio histórico por día y hora, o predicción de la regresión de "
+            "Poisson para el último mes observado. Pacientes a cubrir = percentil del nivel de "
+            "servicio de Poisson(λ). Médicos = ⌈pacientes / capacidad⌉, mínimo 1. "
+            "Cada turno toma el máximo de sus horas para cubrir el pico.")
