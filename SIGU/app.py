@@ -66,7 +66,7 @@ if dff.empty:
 
 tab_datos, tab_desc, tab_dias, tab_poi, tab_mod, tab_malla = st.tabs(
     ["📋 Datos", "📊 Descriptiva", "📅 χ² por día", "🎲 Poisson",
-     "🤖 Regresión Poisson", "👩‍⚕️ Malla de turnos"])
+     "📈 Regresión Poisson", "👩‍⚕️ Malla de turnos"])
 
 # ------------------------------------------------------------------ 1. Datos
 with tab_datos:
