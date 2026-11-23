@@ -58,7 +58,7 @@ dff = be.filtrar(df, triages, ips)
 lleg = llegadas if ips == "Todas" else llegadas[llegadas["Ips"] == ips]
 
 st.title("🏥 ¡SIGU - Sistema Inteligente de Gestion de Urgencias!")
-st.caption("Modelado probabilistico y optimizacion tiempos de epera en urgencias")
+st.caption("Modelado Probabilístico de la Demanda y los Tiempos de Espera en Urgencias mediante la Distribución de Poisson y la Regresión de Poisson")
 
 if dff.empty:
     st.warning("No hay registros con los filtros seleccionados.")
