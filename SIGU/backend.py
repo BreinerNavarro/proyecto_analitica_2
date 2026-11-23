@@ -17,7 +17,7 @@ RAIZ = Path(__file__).resolve().parent.parent          # Project_Analitica_II
 CARPETA_DATOS = RAIZ / "data"
 RUTA_CRUDO = CARPETA_DATOS / "Clasificación_en_Triage_Urgencias_20261003.csv"
 
-ANIO = 2022                 # Año de análisis (igual al informe)
+ANIO = 2022                 # Año de análisis 
 FORMATO_FECHA = "%Y %b %d %I:%M:%S %p"
 MAX_ESPERA_MIN = None       # Ej. 360 si decides recortar registros extremos; None = no recortar
 MAX_SALTO_LLEGADAS = 1440   # Saltos > 24 h entre llegadas se consideran huecos de registro

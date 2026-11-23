@@ -57,8 +57,8 @@ st.sidebar.caption("El filtro de triage no aplica a las pestañas Poisson, Model
 dff = be.filtrar(df, triages, ips)
 lleg = llegadas if ips == "Todas" else llegadas[llegadas["Ips"] == ips]
 
-st.title("🏥 Tiempos de espera y demanda en urgencias")
-st.caption("MVP – Analítica Descriptiva II y Probabilidad")
+st.title("🏥 ¡SIGU - Sistema Inteligente de Gestion de Urgencias!")
+st.caption("Modelado probabilistico y optimizacion tiempos de epera en urgencias")
 
 if dff.empty:
     st.warning("No hay registros con los filtros seleccionados.")
